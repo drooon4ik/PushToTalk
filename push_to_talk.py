@@ -1,196 +1,255 @@
 #!/usr/bin/env python3
-"""macOS Push-to-Talk dictation daemon using whisper.cpp, triggered by holding F5."""
+"""macOS Push-to-Talk dictation daemon using whisper.cpp.
+
+Hold F5 for Russian, F6 for English — release to paste transcribed text at cursor.
+"""
+
+from __future__ import annotations
 
 import logging
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import threading
 import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
 
 import Quartz
 from Quartz import (
-    CGEventGetIntegerValueField,
-    CGEventMaskBit,
-    CGEventTapCreate,
     CFMachPortCreateRunLoopSource,
     CFRunLoopAddSource,
     CFRunLoopGetCurrent,
     CFRunLoopRun,
+    CGEventGetIntegerValueField,
+    CGEventMaskBit,
+    CGEventTapCreate,
+    kCFRunLoopCommonModes,
     kCGEventKeyDown,
     kCGEventKeyUp,
-    kCGEventFlagMaskSecondaryFn,
     kCGHeadInsertEventTap,
     kCGKeyboardEventKeycode,
     kCGSessionEventTap,
-    kCFRunLoopCommonModes,
 )
 
-WHISPER_CLI = shutil.which("whisper-cli") or "/opt/homebrew/bin/whisper-cli"
-MODEL_PATH = os.path.expanduser("~/.local/share/whisper-cpp/ggml-large-v3-turbo.bin")
-RECORD_PATH = os.path.join(tempfile.gettempdir(), "dictation.wav")
-MIN_DURATION_S = 0.4
-F5_KEYCODE = 0x60  # Russian
-F6_KEYCODE = 0x61  # English
-HOTKEY_LANG = {F5_KEYCODE: "ru", F6_KEYCODE: "en"}
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger(__name__)
 
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("pushtotalk")
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
+FFMPEG = "/opt/homebrew/bin/ffmpeg"
+PBCOPY = "/usr/bin/pbcopy"
+WHISPER_CLI = "/opt/homebrew/bin/whisper-cli"
+MODEL_PATH = Path.home() / ".local/share/whisper-cpp/ggml-large-v3-turbo.bin"
+RECORD_PATH = Path(tempfile.gettempdir()) / "dictation.wav"
 
-def notify(title: str, msg: str = ""):
-    pass
+MIN_RECORDING_DURATION = 0.4  # seconds
 
+HOTKEYS: dict[int, str] = {
+    0x60: "ru",  # F5
+    0x61: "en",  # F6
+}
 
-def validate_setup():
-    if not os.path.isfile(WHISPER_CLI):
-        log.error("whisper-cli not found at %s — install via: brew install whisper-cpp", WHISPER_CLI)
+HALLUCINATIONS: frozenset[str] = frozenset({
+    "you",
+    "thank you",
+    "thanks for watching",
+    "silence",
+    "продолжение следует",
+    "субтитры сделал didbyrevol",
+})
+
+# ---------------------------------------------------------------------------
+# Setup validation
+# ---------------------------------------------------------------------------
+
+def validate_setup() -> None:
+    if not Path(WHISPER_CLI).is_file():
+        log.error("whisper-cli not found at %s — run: brew install whisper-cpp", WHISPER_CLI)
         raise SystemExit(1)
-    if not os.path.isfile(MODEL_PATH):
+    if not MODEL_PATH.is_file():
         log.error("Model not found at %s — download from https://huggingface.co/ggerganov/whisper.cpp", MODEL_PATH)
         raise SystemExit(1)
 
+# ---------------------------------------------------------------------------
+# Audio recording
+# ---------------------------------------------------------------------------
 
 class Recorder:
-    def __init__(self):
-        self._proc = None
-        self._start_time = 0.0
+    def __init__(self) -> None:
+        self._proc: Optional[subprocess.Popen] = None
+        self._start_time: float = 0.0
 
-    def start(self):
+    def start(self) -> None:
         self._start_time = time.monotonic()
-        self._proc = subprocess.Popen([
-            "/opt/homebrew/bin/ffmpeg", "-y", "-f", "avfoundation", "-i", ":default",
-            "-ar", "16000", "-ac", "1", "-sample_fmt", "s16",
-            RECORD_PATH,
-        ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self._proc = subprocess.Popen(
+            [
+                FFMPEG, "-y",
+                "-f", "avfoundation", "-i", ":default",
+                "-ar", "16000", "-ac", "1", "-sample_fmt", "s16",
+                str(RECORD_PATH),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         log.info("Recording started")
-        notify("🎙️ Recording...")
 
-    def stop(self) -> str | None:
-        if not self._proc:
+    def stop(self) -> Optional[Path]:
+        if self._proc is None:
             return None
+
         self._proc.terminate()
         self._proc.wait()
         self._proc = None
+
         duration = time.monotonic() - self._start_time
-        if duration < MIN_DURATION_S:
+        if duration < MIN_RECORDING_DURATION:
             log.info("Recording too short (%.2fs), ignoring", duration)
             return None
+
         log.info("Recording stopped (%.2fs)", duration)
         return RECORD_PATH
 
+# ---------------------------------------------------------------------------
+# Transcription
+# ---------------------------------------------------------------------------
 
-def transcribe(wav_path: str, lang: str = "auto") -> str | None:
+def transcribe(wav_path: Path, lang: str) -> Optional[str]:
     log.info("Transcribing (%s)...", lang)
+
     result = subprocess.run(
-        [WHISPER_CLI, "-m", MODEL_PATH, "-f", wav_path, "--no-timestamps", "-t", "4", "-l", lang],
-        capture_output=True, text=True,
+        [WHISPER_CLI, "-m", str(MODEL_PATH), "-f", str(wav_path), "--no-timestamps", "-t", "4", "-l", lang],
+        capture_output=True,
+        text=True,
     )
+
     if result.returncode != 0:
         log.error("whisper-cli failed: %s", result.stderr.strip())
         return None
+
     raw = result.stdout.strip()
     log.debug("Whisper raw output: %r", raw)
+
     text = re.sub(r"\[.*?\]", "", raw).strip()
     text = re.sub(r"^[-\s]+", "", text).strip()
+
     if not text:
-        log.info("Hallucination or silence detected, ignoring")
+        log.info("Empty output, ignoring")
         return None
-    low = text.lower().strip(" .!-")
-    if low in ("you", "thank you", "thanks for watching", "silence",
-                "продолжение следует", "субтитры сделал didbyrevol"):
-        log.info("Hallucination or silence detected, ignoring")
+
+    if text.lower().strip(" .!-") in HALLUCINATIONS:
+        log.info("Hallucination detected, ignoring: %r", text)
         return None
+
     return text
 
+# ---------------------------------------------------------------------------
+# Paste
+# ---------------------------------------------------------------------------
 
-def paste_text(text: str):
-    subprocess.run(["/usr/bin/pbcopy"], input=text.encode(), check=True)
+def paste_text(text: str) -> None:
+    subprocess.run([PBCOPY], input=text.encode(), check=True)
     time.sleep(0.05)
+
     src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateCombinedSessionState)
-    down = Quartz.CGEventCreateKeyboardEvent(src, 0x09, True)
-    up = Quartz.CGEventCreateKeyboardEvent(src, 0x09, False)
-    Quartz.CGEventSetFlags(down, Quartz.kCGEventFlagMaskCommand)
-    Quartz.CGEventSetFlags(up, Quartz.kCGEventFlagMaskCommand)
-    Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, down)
-    Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, up)
+    for is_down in (True, False):
+        event = Quartz.CGEventCreateKeyboardEvent(src, 0x09, is_down)
+        Quartz.CGEventSetFlags(event, Quartz.kCGEventFlagMaskCommand)
+        Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, event)
+
     log.info("Pasted: %s", text)
 
+# ---------------------------------------------------------------------------
+# Main application
+# ---------------------------------------------------------------------------
 
-def main():
-    validate_setup()
-    recorder = Recorder()
-    lock = threading.Lock()
-    recording = False
-    active_lang = "auto"
+class PushToTalkApp:
+    def __init__(self) -> None:
+        self._recorder = Recorder()
+        self._lock = threading.Lock()
+        self._recording = False
+        self._active_lang = "auto"
 
-    def handle_release(lang):
-        wav = recorder.stop()
-        if wav:
-            text = transcribe(wav, lang)
-            if text:
-                paste_text(text)
+    def _on_key_down(self, lang: str) -> None:
+        with self._lock:
+            if self._recording:
+                return
+            self._recording = True
+            self._active_lang = lang
+        self._recorder.start()
 
-    def event_callback(proxy, event_type, event, refcon):
-        nonlocal recording, active_lang
+    def _on_key_up(self) -> None:
+        with self._lock:
+            if not self._recording:
+                return
+            self._recording = False
+            lang = self._active_lang
+        threading.Thread(target=self._process, args=(lang,), daemon=True).start()
+
+    def _process(self, lang: str) -> None:
+        wav = self._recorder.stop()
+        if wav is None:
+            return
+        text = transcribe(wav, lang)
+        if text:
+            paste_text(text)
+
+    def _event_callback(self, proxy, event_type, event, refcon):
         keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
-        if keycode in range(0x60, 0x70):
-            log.debug("Fn-key event: keycode=0x%02X event_type=%d (down=%d up=%d)", keycode, event_type, kCGEventKeyDown, kCGEventKeyUp)
-        if keycode not in HOTKEY_LANG:
+
+        if keycode not in HOTKEYS:
             return event
 
         if event_type == kCGEventKeyDown:
-            with lock:
-                if recording:
-                    return None
-                recording = True
-                active_lang = HOTKEY_LANG[keycode]
-            recorder.start()
+            self._on_key_down(HOTKEYS[keycode])
             return None
 
         if event_type == kCGEventKeyUp:
-            with lock:
-                if not recording:
-                    return None
-                recording = False
-                lang = active_lang
-            threading.Thread(target=handle_release, args=(lang,), daemon=True).start()
+            self._on_key_up()
             return None
 
         return event
 
-    mask = CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp)
-    tap = CGEventTapCreate(
-        kCGSessionEventTap,
-        kCGHeadInsertEventTap,
-        0,  # active filter (not listen-only)
-        mask,
-        event_callback,
-        None,
-    )
-    if tap is None:
-        log.error("Failed to create event tap — grant Accessibility permission in System Settings")
-        raise SystemExit(1)
-
-    source = CFMachPortCreateRunLoopSource(None, tap, 0)
-    CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes)
-    Quartz.CGEventTapEnable(tap, True)
-
-    # Re-enable tap if macOS disables it (common after restart/sleep)
-    def watchdog(_timer, _info):
+    def _watchdog(self, tap, _timer, _info) -> None:
         if not Quartz.CGEventTapIsEnabled(tap):
-            log.warning("Event tap was disabled by macOS, re-enabling...")
+            log.warning("Event tap disabled by macOS, re-enabling...")
             Quartz.CGEventTapEnable(tap, True)
 
-    rl_timer = Quartz.CFRunLoopTimerCreate(None, 0, 5.0, 0, 0, watchdog, None)
-    CFRunLoopAddSource(CFRunLoopGetCurrent(), rl_timer, kCFRunLoopCommonModes)
+    def run(self) -> None:
+        validate_setup()
 
-    log.info("Push-to-Talk ready — F5=Russian, F6=English")
+        mask = CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp)
+        tap = CGEventTapCreate(
+            kCGSessionEventTap,
+            kCGHeadInsertEventTap,
+            0,
+            mask,
+            self._event_callback,
+            None,
+        )
+        if tap is None:
+            log.error("Failed to create event tap — grant Accessibility in System Settings")
+            raise SystemExit(1)
 
-    CFRunLoopRun()
+        source = CFMachPortCreateRunLoopSource(None, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes)
+        Quartz.CGEventTapEnable(tap, True)
+
+        watchdog_cb = lambda t, i: self._watchdog(tap, t, i)
+        timer = Quartz.CFRunLoopTimerCreate(None, 0, 5.0, 0, 0, watchdog_cb, None)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), timer, kCFRunLoopCommonModes)
+
+        log.info("Push-to-Talk ready — F5=Russian, F6=English")
+        CFRunLoopRun()
 
 
 if __name__ == "__main__":
-    main()
+    PushToTalkApp().run()
