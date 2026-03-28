@@ -36,7 +36,7 @@ F5_KEYCODE = 0x60  # Russian
 F6_KEYCODE = 0x61  # English
 HOTKEY_LANG = {F5_KEYCODE: "ru", F6_KEYCODE: "en"}
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pushtotalk")
 
 
@@ -61,7 +61,7 @@ class Recorder:
     def start(self):
         self._start_time = time.monotonic()
         self._proc = subprocess.Popen([
-            "ffmpeg", "-y", "-f", "avfoundation", "-i", ":default",
+            "/opt/homebrew/bin/ffmpeg", "-y", "-f", "avfoundation", "-i", ":default",
             "-ar", "16000", "-ac", "1", "-sample_fmt", "s16",
             RECORD_PATH,
         ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -91,21 +91,23 @@ def transcribe(wav_path: str, lang: str = "auto") -> str | None:
     if result.returncode != 0:
         log.error("whisper-cli failed: %s", result.stderr.strip())
         return None
-    text = result.stdout.strip()
-    text = re.sub(r"\[.*?\]", "", text).strip()
+    raw = result.stdout.strip()
+    log.debug("Whisper raw output: %r", raw)
+    text = re.sub(r"\[.*?\]", "", raw).strip()
     text = re.sub(r"^[-\s]+", "", text).strip()
     if not text:
         log.info("Hallucination or silence detected, ignoring")
         return None
     low = text.lower().strip(" .!-")
-    if low in ("you", "thank you", "thanks for watching", "silence"):
+    if low in ("you", "thank you", "thanks for watching", "silence",
+                "продолжение следует", "субтитры сделал didbyrevol"):
         log.info("Hallucination or silence detected, ignoring")
         return None
     return text
 
 
 def paste_text(text: str):
-    subprocess.run(["pbcopy"], input=text.encode(), check=True)
+    subprocess.run(["/usr/bin/pbcopy"], input=text.encode(), check=True)
     time.sleep(0.05)
     src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateCombinedSessionState)
     down = Quartz.CGEventCreateKeyboardEvent(src, 0x09, True)
@@ -115,7 +117,6 @@ def paste_text(text: str):
     Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, down)
     Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, up)
     log.info("Pasted: %s", text)
-
 
 
 def main():
@@ -135,6 +136,8 @@ def main():
     def event_callback(proxy, event_type, event, refcon):
         nonlocal recording, active_lang
         keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
+        if keycode in range(0x60, 0x70):
+            log.debug("Fn-key event: keycode=0x%02X event_type=%d (down=%d up=%d)", keycode, event_type, kCGEventKeyDown, kCGEventKeyUp)
         if keycode not in HOTKEY_LANG:
             return event
 
@@ -174,6 +177,15 @@ def main():
     source = CFMachPortCreateRunLoopSource(None, tap, 0)
     CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes)
     Quartz.CGEventTapEnable(tap, True)
+
+    # Re-enable tap if macOS disables it (common after restart/sleep)
+    def watchdog(_timer, _info):
+        if not Quartz.CGEventTapIsEnabled(tap):
+            log.warning("Event tap was disabled by macOS, re-enabling...")
+            Quartz.CGEventTapEnable(tap, True)
+
+    rl_timer = Quartz.CFRunLoopTimerCreate(None, 0, 5.0, 0, 0, watchdog, None)
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), rl_timer, kCFRunLoopCommonModes)
 
     log.info("Push-to-Talk ready — F5=Russian, F6=English")
 

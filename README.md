@@ -21,15 +21,18 @@ curl -L "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3
 
 ### 3. Grant macOS permissions
 
-Go to **System Settings → Privacy & Security** and add your Terminal app (or iTerm / PyCharm) to:
+Go to **System Settings → Privacy & Security** and add your Terminal app (or iTerm) and Python.app to:
 
 - **Accessibility** — required for global key listening and simulated paste
-- **Microphone** — required for audio recording
+  - Add `/Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app`
+- **Microphone** — required for audio recording (granted via iTerm on first use)
 - **Input Monitoring** — required for intercepting F5/F6 keys
 
 > macOS will prompt on first run if permissions are missing.
 
 ## Usage
+
+### Manual run
 
 ```bash
 python3 push_to_talk.py
@@ -38,25 +41,37 @@ python3 push_to_talk.py
 - Hold **F5** → speak Russian → release → text is pasted at cursor
 - Hold **F6** → speak English → release → text is pasted at cursor
 
-## Auto-Start on Login
+> Press F5/F6 in any app **except** the terminal running the script.
+
+### Auto-start on iTerm launch
+
+Add the following to your `~/.zshrc`:
 
 ```bash
-cp com.user.pushtotalk.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.user.pushtotalk.plist
+# Push-to-Talk: start in background if not already running
+_ptt_pid="/tmp/pushtotalk.pid"
+if [ -f "$_ptt_pid" ] && kill -0 "$(cat "$_ptt_pid")" 2>/dev/null; then
+    echo "🎙️ PushToTalk already running (pid $(cat "$_ptt_pid"))"
+else
+    nohup /usr/local/bin/python3 /Users/apochynok/PycharmProjects/PushToTalk/push_to_talk.py >> /tmp/pushtotalk.log 2>&1 &
+    echo $! > "$_ptt_pid"
+    echo "🎙️ PushToTalk started (pid $!)"
+fi
 ```
 
-To stop:
+The script starts in the background when you open iTerm. Subsequent tabs/windows will detect the running process and skip re-launching.
+
+### Stop the service
+
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.user.pushtotalk.plist
+pkill -9 -f push_to_talk.py; rm -f /tmp/pushtotalk.pid
 ```
 
-After editing the script, reload the service:
+### Check if running
+
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.user.pushtotalk.plist
-launchctl load ~/Library/LaunchAgents/com.user.pushtotalk.plist
+pgrep -f push_to_talk.py && echo "✅ Running" || echo "❌ Not running"
 ```
-
-Or just log out and log back in.
 
 ## Logs
 
