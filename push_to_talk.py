@@ -16,6 +16,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+import signal
+import atexit
 
 import Quartz
 from Quartz import (
@@ -86,15 +88,32 @@ class Recorder:
     def __init__(self) -> None:
         self._proc: Optional[subprocess.Popen] = None
         self._start_time: float = 0.0
+        self._recording = False
+        self._temp_file: Optional[Path] = None
+        atexit.register(self._cleanup)
+
+    def _cleanup(self) -> None:
+        if self._proc:
+            self._proc.terminate()
+            self._proc.wait()
 
     def start(self) -> None:
+        if self._recording:
+            return
+            
+        self._recording = True
         self._start_time = time.monotonic()
+        
+        # Create new temp file for this recording
+        self._temp_file = Path(tempfile.mktemp(suffix=".wav", dir=tempfile.gettempdir()))
+        
+        # Start ffmpeg only when recording
         self._proc = subprocess.Popen(
             [
                 FFMPEG, "-y",
                 "-f", "avfoundation", "-i", ":default",
                 "-ar", "16000", "-ac", "1", "-sample_fmt", "s16",
-                str(RECORD_PATH),
+                str(self._temp_file),
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -103,20 +122,25 @@ class Recorder:
         log.info("Recording started")
 
     def stop(self) -> Optional[Path]:
-        if self._proc is None:
+        if not self._recording or not self._proc or not self._temp_file:
             return None
 
+        self._recording = False
+        
+        # Stop recording and close microphone
         self._proc.terminate()
         self._proc.wait()
         self._proc = None
-
+        
         duration = time.monotonic() - self._start_time
         if duration < MIN_RECORDING_DURATION:
             log.info("Recording too short (%.2fs), ignoring", duration)
+            if self._temp_file.exists():
+                self._temp_file.unlink()
             return None
 
         log.info("Recording stopped (%.2fs)", duration)
-        return RECORD_PATH
+        return self._temp_file
 
 # ---------------------------------------------------------------------------
 # Transcription
@@ -125,31 +149,36 @@ class Recorder:
 def transcribe(wav_path: Path, lang: str) -> Optional[str]:
     log.info("Transcribing (%s)...", lang)
 
-    result = subprocess.run(
-        [WHISPER_CLI, "-m", str(MODEL_PATH), "-f", str(wav_path), "--no-timestamps", "-t", "4", "-l", lang],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [WHISPER_CLI, "-m", str(MODEL_PATH), "-f", str(wav_path), "--no-timestamps", "-t", "4", "-l", lang],
+            capture_output=True,
+            text=True,
+        )
 
-    if result.returncode != 0:
-        log.error("whisper-cli failed: %s", result.stderr.strip())
-        return None
+        if result.returncode != 0:
+            log.error("whisper-cli failed: %s", result.stderr.strip())
+            return None
 
-    raw = result.stdout.strip()
-    log.debug("Whisper raw output: %r", raw)
+        raw = result.stdout.strip()
+        log.debug("Whisper raw output: %r", raw)
 
-    text = re.sub(r"\[.*?\]", "", raw).strip()
-    text = re.sub(r"^[-\s]+", "", text).strip()
+        text = re.sub(r"\[.*?\]", "", raw).strip()
+        text = re.sub(r"^[-\s]+", "", text).strip()
 
-    if not text:
-        log.info("Empty output, ignoring")
-        return None
+        if not text:
+            log.info("Empty output, ignoring")
+            return None
 
-    if text.lower().strip(" .!-") in HALLUCINATIONS:
-        log.info("Hallucination detected, ignoring: %r", text)
-        return None
+        if text.lower().strip(" .!-") in HALLUCINATIONS:
+            log.info("Hallucination detected, ignoring: %r", text)
+            return None
 
-    return text
+        return text
+    finally:
+        # Clean up temp file
+        if wav_path.exists():
+            wav_path.unlink()
 
 # ---------------------------------------------------------------------------
 # Paste
