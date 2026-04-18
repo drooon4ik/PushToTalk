@@ -59,6 +59,10 @@ HOTKEYS: dict[int, str] = {
     0x61: "en",  # F6
 }
 
+_HERE = Path(__file__).parent
+SOUND_BEGIN = _HERE / "sounds" / "begin_record.caf"
+SOUND_END = _HERE / "sounds" / "end_record.caf"
+
 HALLUCINATIONS: frozenset[str] = frozenset({
     "you",
     "thank you",
@@ -67,6 +71,9 @@ HALLUCINATIONS: frozenset[str] = frozenset({
     "продолжение следует",
     "субтитры сделал didbyrevol",
 })
+
+def play_sound(path: Path) -> None:
+    subprocess.Popen(["afplay", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 # ---------------------------------------------------------------------------
 # Setup validation
@@ -213,6 +220,7 @@ class PushToTalkApp:
                 return
             self._recording = True
             self._active_lang = lang
+        play_sound(SOUND_BEGIN)
         self._recorder.start()
 
     def _on_key_up(self) -> None:
@@ -221,6 +229,7 @@ class PushToTalkApp:
                 return
             self._recording = False
             lang = self._active_lang
+        play_sound(SOUND_END)
         threading.Thread(target=self._process, args=(lang,), daemon=True).start()
 
     def _process(self, lang: str) -> None:
