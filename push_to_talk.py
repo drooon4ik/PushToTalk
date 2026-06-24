@@ -7,17 +7,17 @@ Hold F5 for Russian, F6 for English — release to paste transcribed text at cur
 from __future__ import annotations
 
 import logging
-import os
 import re
 import subprocess
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, field
+import wave
 from pathlib import Path
 from typing import Optional
-import signal
 import atexit
+
+import pyaudio
 
 import Quartz
 from Quartz import (
@@ -46,11 +46,13 @@ log = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-FFMPEG = "/opt/homebrew/bin/ffmpeg"
 PBCOPY = "/usr/bin/pbcopy"
 WHISPER_CLI = "/opt/homebrew/bin/whisper-cli"
 MODEL_PATH = Path.home() / ".local/share/whisper-cpp/ggml-large-v3-turbo.bin"
-RECORD_PATH = Path(tempfile.gettempdir()) / "dictation.wav"
+
+SAMPLE_RATE = 16000
+CHANNELS = 1
+CHUNK_SIZE = 1024
 
 MIN_RECORDING_DURATION = 0.4  # seconds
 
@@ -72,8 +74,10 @@ HALLUCINATIONS: frozenset[str] = frozenset({
     "субтитры сделал didbyrevol",
 })
 
+
 def play_sound(path: Path) -> None:
     subprocess.Popen(["afplay", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 
 # ---------------------------------------------------------------------------
 # Setup validation
@@ -87,67 +91,74 @@ def validate_setup() -> None:
         log.error("Model not found at %s — download from https://huggingface.co/ggerganov/whisper.cpp", MODEL_PATH)
         raise SystemExit(1)
 
+
 # ---------------------------------------------------------------------------
-# Audio recording
+# Audio recording (PyAudio — instant start, no process spawn)
 # ---------------------------------------------------------------------------
 
 class Recorder:
     def __init__(self) -> None:
-        self._proc: Optional[subprocess.Popen] = None
+        self._pa = pyaudio.PyAudio()
+        self._stream: Optional[pyaudio.Stream] = None
+        self._frames: list[bytes] = []
         self._start_time: float = 0.0
         self._recording = False
-        self._temp_file: Optional[Path] = None
         atexit.register(self._cleanup)
 
     def _cleanup(self) -> None:
-        if self._proc:
-            self._proc.terminate()
-            self._proc.wait()
+        if self._stream:
+            self._stream.close()
+        self._pa.terminate()
 
     def start(self) -> None:
         if self._recording:
             return
-            
-        self._recording = True
+
+        self._frames = []
         self._start_time = time.monotonic()
-        
-        # Create new temp file for this recording
-        self._temp_file = Path(tempfile.mktemp(suffix=".wav", dir=tempfile.gettempdir()))
-        
-        # Start ffmpeg only when recording
-        self._proc = subprocess.Popen(
-            [
-                FFMPEG, "-y",
-                "-f", "avfoundation", "-i", ":default",
-                "-ar", "16000", "-ac", "1", "-sample_fmt", "s16",
-                str(self._temp_file),
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        self._recording = True
+
+        self._stream = self._pa.open(
+            format=pyaudio.paInt16,
+            channels=CHANNELS,
+            rate=SAMPLE_RATE,
+            input=True,
+            frames_per_buffer=CHUNK_SIZE,
+            stream_callback=self._audio_callback,
         )
         log.info("Recording started")
 
+    def _audio_callback(self, in_data, frame_count, time_info, status):
+        if self._recording:
+            self._frames.append(in_data)
+        return (None, pyaudio.paContinue)
+
     def stop(self) -> Optional[Path]:
-        if not self._recording or not self._proc or not self._temp_file:
+        if not self._recording:
             return None
 
         self._recording = False
-        
-        # Stop recording and close microphone
-        self._proc.terminate()
-        self._proc.wait()
-        self._proc = None
-        
+
+        if self._stream:
+            self._stream.stop_stream()
+            self._stream.close()
+            self._stream = None
+
         duration = time.monotonic() - self._start_time
         if duration < MIN_RECORDING_DURATION:
             log.info("Recording too short (%.2fs), ignoring", duration)
-            if self._temp_file.exists():
-                self._temp_file.unlink()
             return None
 
-        log.info("Recording stopped (%.2fs)", duration)
-        return self._temp_file
+        temp_file = Path(tempfile.mktemp(suffix=".wav", dir=tempfile.gettempdir()))
+        with wave.open(str(temp_file), "wb") as wf:
+            wf.setnchannels(CHANNELS)
+            wf.setsampwidth(2)
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(b"".join(self._frames))
+
+        log.info("Recording stopped (%.2fs, %d bytes)", duration, temp_file.stat().st_size)
+        return temp_file
+
 
 # ---------------------------------------------------------------------------
 # Transcription
@@ -183,9 +194,9 @@ def transcribe(wav_path: Path, lang: str) -> Optional[str]:
 
         return text
     finally:
-        # Clean up temp file
         if wav_path.exists():
             wav_path.unlink()
+
 
 # ---------------------------------------------------------------------------
 # Paste
@@ -202,6 +213,7 @@ def paste_text(text: str) -> None:
         Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, event)
 
     log.info("Pasted: %s", text)
+
 
 # ---------------------------------------------------------------------------
 # Main application
