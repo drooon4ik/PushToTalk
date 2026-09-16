@@ -255,6 +255,8 @@ class PushToTalkApp:
     def _event_callback(self, proxy, event_type, event, refcon):
         keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
 
+        log.debug("KEY event_type=%s keycode=0x%x (%d)", event_type, keycode, keycode)
+
         if keycode not in HOTKEYS:
             return event
 
@@ -294,8 +296,16 @@ class PushToTalkApp:
         Quartz.CGEventTapEnable(tap, True)
 
         watchdog_cb = lambda t, i: self._watchdog(tap, t, i)
-        timer = Quartz.CFRunLoopTimerCreate(None, 0, 5.0, 0, 0, watchdog_cb, None)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), timer, kCFRunLoopCommonModes)
+        timer = Quartz.CFRunLoopTimerCreate(
+            None,
+            Quartz.CFAbsoluteTimeGetCurrent() + 5.0,
+            5.0,
+            0,
+            0,
+            watchdog_cb,
+            None,
+        )
+        Quartz.CFRunLoopAddTimer(CFRunLoopGetCurrent(), timer, kCFRunLoopCommonModes)
 
         log.info("Push-to-Talk ready — F5=Russian, F6=English")
         CFRunLoopRun()
