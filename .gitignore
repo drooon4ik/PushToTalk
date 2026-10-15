@@ -1,3 +1,8 @@
 .idea/
 __pycache__/
 *.pyc
+
+# local helper/scratch files
+_gitrun.py
+_gitout.txt
+_register_autostart.ps1

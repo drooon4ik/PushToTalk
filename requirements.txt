@@ -1,2 +1,12 @@
-pyobjc-framework-Quartz
+# Cross-platform Push-to-Talk dependencies.
+# Install with:  pip install -r requirements.txt
+# pip evaluates the environment markers below and installs only what your OS needs.
+
+# Audio capture (all platforms).
 pyaudio
+
+# macOS: global hotkeys + simulated paste via Quartz.
+pyobjc-framework-Quartz; sys_platform == "darwin"
+
+# Windows / Linux: global hotkeys + simulated paste via pynput.
+pynput; sys_platform != "darwin"
