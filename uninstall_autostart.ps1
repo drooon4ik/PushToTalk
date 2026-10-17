@@ -3,7 +3,7 @@
     Disable Push-to-Talk auto-start at Windows logon.
 
 .DESCRIPTION
-    Removes whatever install_windows.ps1 -AutoStart created:
+    Removes whatever install_windows.ps1 created for auto-start:
       * the 'PushToTalkDictation' scheduled task, and/or
       * the Startup-folder shortcut (PushToTalk.lnk).
     Also offers to stop any running instance.

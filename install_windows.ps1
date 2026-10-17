@@ -8,7 +8,7 @@
       2. Python dependencies from requirements.txt (pyaudio, pynput).
       3. whisper.cpp (whisper-cli.exe + DLLs) into %LOCALAPPDATA%\whisper-cpp.
       4. A Whisper model into %LOCALAPPDATA%\whisper-cpp.
-      5. (Optional) Auto-start at Windows logon via a hidden pythonw task.
+      5. Auto-start at Windows logon via a hidden pythonw task (ON by default).
 
     Re-running the script is safe: existing, valid components are skipped.
 
@@ -21,8 +21,9 @@
       tiny           (~75 MB)
     Pass 'none' to skip the model download.
 
-.PARAMETER AutoStart
-    Register the app to start automatically at Windows logon (hidden window).
+.PARAMETER NoAutoStart
+    Skip registering the app to start automatically at Windows logon.
+    Auto-start is enabled by default.
 
 .PARAMETER NoWhisper
     Skip downloading the whisper.cpp binaries.
@@ -31,15 +32,18 @@
     powershell -ExecutionPolicy Bypass -File install_windows.ps1
 
 .EXAMPLE
-    powershell -ExecutionPolicy Bypass -File install_windows.ps1 -Model small -AutoStart
+    powershell -ExecutionPolicy Bypass -File install_windows.ps1 -Model small -NoAutoStart
 #>
 [CmdletBinding()]
 param(
     [ValidateSet('large-v3-turbo', 'medium', 'small', 'base', 'tiny', 'none')]
     [string]$Model = 'large-v3-turbo',
-    [switch]$AutoStart,
+    [switch]$NoAutoStart,
     [switch]$NoWhisper
 )
+
+# Auto-start at logon is enabled by default. Pass -NoAutoStart to skip it.
+$AutoStart = -not $NoAutoStart
 
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -283,7 +287,7 @@ if ($AutoStart) {
         Write-Ok "Startup shortcut created: $lnk"
     }
 } else {
-    Write-Step 'Auto-start not requested (pass -AutoStart to enable)'
+    Write-Step 'Auto-start skipped (-NoAutoStart specified)'
 }
 
 # ---------------------------------------------------------------------------
@@ -302,5 +306,7 @@ Write-Host '  Hold F5 = Russian, F6 = English. Release to paste.' -ForegroundCol
 if ($AutoStart) {
     Write-Host '  It will also start automatically next time you log in.' -ForegroundColor White
     Write-Host "  To disable: powershell -File uninstall_autostart.ps1" -ForegroundColor Gray
+} else {
+    Write-Host '  Auto-start was skipped (-NoAutoStart).' -ForegroundColor White
 }
 Write-Host ''

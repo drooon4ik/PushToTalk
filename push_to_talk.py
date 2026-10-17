@@ -36,6 +36,13 @@ IS_MAC = sys.platform == "darwin"
 IS_WINDOWS = sys.platform.startswith("win")
 IS_LINUX = sys.platform.startswith("linux")
 
+# On Windows, child processes started from a console-less (pythonw) parent can
+# still pop up their own console window. Passing CREATE_NO_WINDOW to subprocess
+# suppresses that flashing console (e.g. whisper-cli.exe during transcription).
+# subprocess.CREATE_NO_WINDOW exists only on Windows.
+NO_WINDOW_FLAGS = subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0
+
+
 # ---------------------------------------------------------------------------
 # Shared configuration
 # ---------------------------------------------------------------------------
@@ -806,6 +813,7 @@ def transcribe(backend: PlatformBackend, wav_path: Path, lang: str) -> Optional[
             text=True,
             encoding="utf-8",
             errors="replace",
+            creationflags=NO_WINDOW_FLAGS,
         )
 
         if result.returncode != 0:

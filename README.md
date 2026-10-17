@@ -75,7 +75,7 @@ Logs: `tail -f /tmp/pushtotalk.log`
 ### Quick install (recommended)
 
 An all-in-one installer sets up **everything** — Python, dependencies, whisper.cpp,
-the model, and (optionally) auto-start at logon.
+the model, and auto-start at logon.
 
 Open **PowerShell** in the project folder and run:
 
@@ -83,11 +83,11 @@ Open **PowerShell** in the project folder and run:
 powershell -ExecutionPolicy Bypass -File install_windows.ps1
 ```
 
-To also start the app automatically every time you log in to Windows (hidden, no
-console window), add `-AutoStart`:
+By default the app is also registered to start automatically every time you log in
+to Windows (hidden, no console window). To skip that, add `-NoAutoStart`:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File install_windows.ps1 -AutoStart
+powershell -ExecutionPolicy Bypass -File install_windows.ps1 -NoAutoStart
 ```
 
 Options:
@@ -95,17 +95,20 @@ Options:
 | Flag | Meaning |
 | --- | --- |
 | `-Model <name>` | Model to download: `large-v3-turbo` (default, ~1.5 GB), `medium`, `small`, `base`, `tiny`, or `none` to skip. |
-| `-AutoStart` | Register a logon task so it runs at every Windows startup. |
+| `-NoAutoStart` | Do **not** register the logon task (auto-start is on by default). |
 | `-NoWhisper` | Skip downloading the whisper.cpp binaries. |
 
 Examples:
 
 ```powershell
-# Smaller/faster model, with auto-start:
-powershell -ExecutionPolicy Bypass -File install_windows.ps1 -Model small -AutoStart
+# Smaller/faster model (auto-start still enabled by default):
+powershell -ExecutionPolicy Bypass -File install_windows.ps1 -Model small
 
 # Everything except the model (download it yourself later):
 powershell -ExecutionPolicy Bypass -File install_windows.ps1 -Model none
+
+# Install without registering auto-start:
+powershell -ExecutionPolicy Bypass -File install_windows.ps1 -NoAutoStart
 ```
 
 What the installer does:
@@ -114,7 +117,7 @@ What the installer does:
 2. Installs `pyaudio` and `pynput` from `requirements.txt`.
 3. Downloads whisper.cpp (`whisper-cli.exe` + DLLs) to `%LOCALAPPDATA%\whisper-cpp`.
 4. Downloads the Whisper model to `%LOCALAPPDATA%\whisper-cpp\ggml-large-v3-turbo.bin`.
-5. With `-AutoStart`: registers a hidden logon task named `PushToTalkDictation`.
+5. Registers a hidden logon task named `PushToTalkDictation` (unless `-NoAutoStart`).
 
 Re-running the installer is safe — it skips anything already in place.
 
@@ -229,7 +232,8 @@ Get-Process pythonw -ErrorAction SilentlyContinue | Stop-Process
 
 #### Auto-start at logon (manual)
 
-The quick installer handles this with `-AutoStart`. To do it by hand, register a
+The quick installer handles this by default (disable with `-NoAutoStart`). To do
+it by hand, register a
 Scheduled Task that runs at logon with no console window:
 
 ```powershell
