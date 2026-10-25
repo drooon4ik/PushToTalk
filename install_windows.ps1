@@ -164,46 +164,83 @@ Write-Ok 'Dependencies installed (pyaudio, pynput).'
 if ($NoWhisper) {
     Write-Step 'Skipping whisper.cpp download (-NoWhisper)'
 } else {
-    Write-Step 'Installing whisper.cpp (whisper-cli.exe)'
+    Write-Step 'Installing whisper.cpp (GPU / CUDA build)'
     New-Item -ItemType Directory -Path $WhisperDir -Force | Out-Null
     $cliTarget = Join-Path $WhisperDir 'whisper-cli.exe'
 
-    if (Test-Path $cliTarget) {
-        Write-Ok "whisper-cli.exe already present: $cliTarget"
+    # This project uses the NVIDIA GPU (CUDA) build only.
+    $hasNvidia = $false
+    try {
+        $gpus = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
+        if ($gpus | Where-Object { $_.Name -match 'NVIDIA' }) { $hasNvidia = $true }
+    } catch { }
+    if (-not $hasNvidia) {
+        Write-Warn2 'No NVIDIA GPU detected — the CUDA build may fail to run on this machine.'
     } else {
-        # Resolve the latest Windows x64 build zip from the GitHub API.
-        $zipUrl = $null
-        try {
-            $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest' `
-                -Headers @{ 'User-Agent' = 'ptt-installer' } -UseBasicParsing
-            $asset = $rel.assets | Where-Object { $_.name -eq 'whisper-bin-x64.zip' } | Select-Object -First 1
-            if ($asset) { $zipUrl = $asset.browser_download_url }
-        } catch {
-            Write-Warn2 "GitHub API lookup failed: $($_.Exception.Message)"
-        }
-        if (-not $zipUrl) {
-            # Fallback to a known-good build tag.
-            $zipUrl = 'https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip'
-            Write-Warn2 "Falling back to pinned build: $zipUrl"
-        }
+        Write-Ok 'NVIDIA GPU detected — installing the CUDA 12.4 build.'
+    }
 
-        $zip = Join-Path $env:TEMP 'whisper-bin-x64.zip'
-        $tmp = Join-Path $env:TEMP 'whisper-bin-x64'
-        Write-Host "    Downloading $zipUrl"
-        Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing
+    # Pinned known-good nightly build that ships Windows binaries.
+    $buildTag   = 'b5454'
+    $baseUrl    = "https://github.com/ggml-org/whisper.cpp/releases/download/$buildTag"
+    $cpuZipUrl  = "$baseUrl/whisper-bin-x64.zip"                   # base ggml DLLs
+    $cudaZipUrl = "$baseUrl/whisper-bin-win-cuda-12.4.0-x64.zip"   # GPU build
+
+    # Detect whether an existing install is already a CUDA build. The CUDA
+    # package ships ggml-cuda / cudart DLLs; a CPU-only install does not.
+    function Test-CudaInstalled {
+        if (-not (Test-Path $cliTarget)) { return $false }
+        $cuda = Get-ChildItem -Path $WhisperDir -Filter '*.dll' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match 'cuda|cudart|cublas' }
+        return [bool]$cuda
+    }
+
+    # Helper: download a zip and copy its exe/dll into $WhisperDir.
+    function Expand-WhisperZip($url, $label) {
+        $zip = Join-Path $env:TEMP ("whisper-" + [IO.Path]::GetFileName($url))
+        $tmp = Join-Path $env:TEMP ("whisper-extract-" + [Guid]::NewGuid().ToString('N'))
+        Write-Host "    Downloading $label`:`n      $url"
+        Write-Host '    (this can be large and may take a while...)'
+        try {
+            Start-BitsTransfer -Source $url -Destination $zip -Description "whisper.cpp $label"
+        } catch {
+            Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+        }
         if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
         Expand-Archive -Path $zip -DestinationPath $tmp -Force
-
-        # The exe + DLLs may be at the root or under a Release/ subfolder.
         $cli = Get-ChildItem -Path $tmp -Recurse -Filter 'whisper-cli.exe' | Select-Object -First 1
-        if (-not $cli) { throw 'whisper-cli.exe not found inside the downloaded archive.' }
-        $srcDir = $cli.Directory.FullName
-        # Copy the exe plus every DLL from the same folder (runtime deps).
-        Copy-Item (Join-Path $srcDir '*.exe') $WhisperDir -Force
+        if ($cli) { $srcDir = $cli.Directory.FullName } else { $srcDir = $tmp }
+        Copy-Item (Join-Path $srcDir '*.exe') $WhisperDir -Force -ErrorAction SilentlyContinue
         Copy-Item (Join-Path $srcDir '*.dll') $WhisperDir -Force -ErrorAction SilentlyContinue
         Remove-Item $zip -Force -ErrorAction SilentlyContinue
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Ok "whisper-cli.exe installed to $WhisperDir"
+    }
+
+    if (Test-CudaInstalled) {
+        Write-Ok "CUDA build already present: $cliTarget"
+    } else {
+        if (Test-Path $cliTarget) {
+            # An older CPU-only build exists. Replace just the binaries/DLLs
+            # with the GPU build; the model file is left untouched.
+            Write-Warn2 'Existing CPU build found — replacing it with the GPU (CUDA) build.'
+            Write-Warn2 'The downloaded model is kept (not re-downloaded).'
+            Get-ChildItem -Path $WhisperDir -Include '*.exe', '*.dll' -File -ErrorAction SilentlyContinue |
+                Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+
+        # The CUDA package relies on base ggml DLLs shipped in the CPU zip, so
+        # lay down the CPU base first, then overlay the CUDA build on top.
+        Expand-WhisperZip $cpuZipUrl  'CPU base (DLLs)'
+        Expand-WhisperZip $cudaZipUrl 'CUDA 12.4 GPU build'
+
+        if (-not (Test-Path $cliTarget)) {
+            throw "whisper-cli.exe not found after extraction in $WhisperDir."
+        }
+        if (Test-CudaInstalled) {
+            Write-Ok "GPU (CUDA) whisper-cli.exe installed to $WhisperDir"
+        } else {
+            Write-Warn2 "Installed whisper-cli, but no CUDA DLLs detected in $WhisperDir."
+        }
     }
 }
 

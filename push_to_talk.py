@@ -55,6 +55,19 @@ HOTKEY_LANGS: dict[str, str] = {
 _HERE = Path(__file__).parent
 
 
+def _no_window_kwargs() -> dict:
+    """Return subprocess kwargs that prevent a console window from flashing.
+
+    When the daemon runs under pythonw.exe (no console), each subprocess
+    call to whisper-cli.exe would otherwise pop up its own console window.
+    CREATE_NO_WINDOW suppresses that. No-op on non-Windows platforms.
+    """
+    if not IS_WINDOWS:
+        return {}
+    CREATE_NO_WINDOW = 0x08000000
+    return {"creationflags": CREATE_NO_WINDOW}
+
+
 def _is_ascii_path(p) -> bool:
     """True if the path contains only ASCII characters.
 
@@ -541,6 +554,14 @@ class PynputBackend(PlatformBackend):
             self.send_paste()
             return
 
+        # Also place the text on the clipboard so it can be re-pasted later
+        # (Ctrl+V) in addition to being typed directly below. Failure here must
+        # not prevent typing, so swallow clipboard errors.
+        try:
+            self.copy_to_clipboard(text)
+        except Exception as exc:  # pragma: no cover - clipboard is best-effort
+            log.warning("Could not copy to clipboard: %s", exc)
+
         import ctypes
         from ctypes import wintypes
 
@@ -806,6 +827,7 @@ def transcribe(backend: PlatformBackend, wav_path: Path, lang: str) -> Optional[
             text=True,
             encoding="utf-8",
             errors="replace",
+            **_no_window_kwargs(),
         )
 
         if result.returncode != 0:
