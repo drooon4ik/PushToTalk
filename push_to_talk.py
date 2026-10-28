@@ -806,6 +806,57 @@ class Recorder:
 # Transcription
 # ---------------------------------------------------------------------------
 
+def warm_up(backend: PlatformBackend) -> None:
+    """Run whisper once on a short silent clip to preload the model.
+
+    The first real transcription is slow because whisper-cli has to read the
+    ~1.5 GB model from disk and load it into memory (and, on Windows, pass the
+    exe/DLLs through antivirus). Doing a throwaway run in the background at
+    startup moves that one-time cost off the first real dictation.
+    """
+    tmp_dir = ASCII_WORKDIR if ASCII_WORKDIR is not None else Path(tempfile.gettempdir())
+    wav_path = tmp_dir / "ptt_warmup.wav"
+    try:
+        # 0.5 s of silence, 16 kHz mono 16-bit.
+        frames = b"\x00\x00" * (SAMPLE_RATE // 2)
+        with wave.open(str(wav_path), "wb") as wf:
+            wf.setnchannels(CHANNELS)
+            wf.setsampwidth(2)
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(frames)
+
+        log.info("Warming up whisper model (preloading)...")
+        start = time.time()
+        subprocess.run(
+            [
+                backend.whisper_cli,
+                "-m",
+                str(backend.model_path),
+                "-f",
+                str(wav_path),
+                "--no-timestamps",
+                "-t",
+                "4",
+                "-l",
+                "en",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **_no_window_kwargs(),
+        )
+        log.info("Warm-up done in %.1fs — first dictation will be fast.", time.time() - start)
+    except Exception as exc:  # pragma: no cover - best-effort optimisation
+        log.warning("Warm-up failed (ignored): %s", exc)
+    finally:
+        if wav_path.exists():
+            try:
+                wav_path.unlink()
+            except OSError:
+                pass
+
+
 def transcribe(backend: PlatformBackend, wav_path: Path, lang: str) -> Optional[str]:
     log.info("Transcribing (%s)...", lang)
 
@@ -894,6 +945,9 @@ class PushToTalkApp:
 
     def run(self) -> None:
         self._backend.validate()
+        threading.Thread(
+            target=warm_up, args=(self._backend,), daemon=True
+        ).start()
         self._backend.run_event_loop(self._on_key_down, self._on_key_up)
 
 
